@@ -17,7 +17,7 @@ users = {
 # users["newemail@example.com"] = "newpassword"
 
 # ==================================================
-# 🔐 AGENT API TOKEN
+# 🔐 API TOKEN (MUST MATCH agent.py)
 # ==================================================
 
 API_TOKEN = "rellatrix_monitoring_tailscale"
@@ -27,7 +27,7 @@ API_TOKEN = "rellatrix_monitoring_tailscale"
 # ==================================================
 
 devices = {}
-OFFLINE_THRESHOLD = 15  # seconds before marking device offline
+OFFLINE_THRESHOLD = 15  # seconds
 
 # ==================================================
 # LOGIN PAGE
@@ -58,7 +58,7 @@ button { padding:10px 20px; background:#2563eb; border:none; color:white; border
 """
 
 # ==================================================
-# DASHBOARD PAGE (Cisco-style + Live Graphs)
+# DASHBOARD PAGE (SMOOTH NOC VERSION)
 # ==================================================
 
 DASHBOARD_PAGE = """
@@ -102,6 +102,7 @@ function createDeviceCard(name) {
         <p><b>Relay:</b> <span id="relay_${name}">-</span></p>
         <p><b>Latency:</b> <span id="latency_${name}">0</span> ms</p>
         <p><b>Jitter:</b> <span id="jitter_${name}">0</span></p>
+        <p><b>Packet Loss:</b> <span id="packet_${name}">0%</span></p>
         <p><b>Download:</b> <span id="download_${name}">0</span> Mbps</p>
         <p><b>Upload:</b> <span id="upload_${name}">0</span> Mbps</p>
         <p><b>Last Seen:</b> <span id="last_${name}">-</span></p>
@@ -149,6 +150,7 @@ function updateDeviceCard(name, device) {
     document.getElementById("relay_" + name).innerText = device.relay;
     document.getElementById("latency_" + name).innerText = device.latency;
     document.getElementById("jitter_" + name).innerText = device.jitter;
+    document.getElementById("packet_" + name).innerText = device.packet_loss;
     document.getElementById("download_" + name).innerText = device.download_mbps;
     document.getElementById("upload_" + name).innerText = device.upload_mbps;
     document.getElementById("last_" + name).innerText = device.last_seen;
@@ -239,7 +241,7 @@ Tailscale Network Operations Center
 """
 
 # ==================================================
-# AUTH ROUTES
+# ROUTES
 # ==================================================
 
 @app.route("/login", methods=["GET", "POST"])
@@ -257,15 +259,10 @@ def login():
 
     return render_template_string(LOGIN_PAGE, error=error)
 
-
 @app.route("/logout")
 def logout():
     session.pop("user", None)
     return redirect(url_for("login"))
-
-# ==================================================
-# AGENT UPDATE API
-# ==================================================
 
 @app.route("/api/update", methods=["POST"])
 def update():
@@ -282,17 +279,13 @@ def update():
         "latency": data.get("latency"),
         "jitter": data.get("jitter"),
         "packet_loss": data.get("packet_loss"),
-        "download_mbps": data.get("download_mbps", 0),
-        "upload_mbps": data.get("upload_mbps", 0),
+        "download_mbps": data.get("download_mbps"),
+        "upload_mbps": data.get("upload_mbps"),
         "last_seen": time.strftime("%H:%M:%S"),
         "timestamp": time.time()
     }
 
     return jsonify({"ok": True})
-
-# ==================================================
-# DEVICE DATA API
-# ==================================================
 
 @app.route("/api/devices")
 def get_devices():
@@ -304,16 +297,9 @@ def get_devices():
 
     for name, data in devices.items():
         offline = (current_time - data["timestamp"]) > OFFLINE_THRESHOLD
-        output[name] = {
-            **data,
-            "offline": offline
-        }
+        output[name] = {**data, "offline": offline}
 
     return jsonify(output)
-
-# ==================================================
-# DASHBOARD
-# ==================================================
 
 @app.route("/")
 def dashboard():
@@ -322,7 +308,7 @@ def dashboard():
     return render_template_string(DASHBOARD_PAGE)
 
 # ==================================================
-# RUN SERVER
+# RUN
 # ==================================================
 
 if __name__ == "__main__":
