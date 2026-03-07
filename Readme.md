@@ -10,6 +10,3 @@ python3 central_server.py
 or
 python central_server.py
 
-
-
-API_TOKEN = "rellatrix_monitoring_tailscale"
