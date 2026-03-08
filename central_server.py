@@ -4,34 +4,35 @@ import time
 app = Flask(__name__)
 app.secret_key = "change_this_to_random_secret_key"
 
-# ==================================================
-# 🔐 USER ACCOUNTS
-# ==================================================
+# =============================
+# USERS
+# =============================
 
 users = {
     "jbabasa@rellatrix.com": "otm"
 }
-
 # Do you want to add more account?
-# Example:
-# users["newemail@example.com"] = "newpassword"
+# users["new@email.com"] = "password"
 
-# ==================================================
-# 🔐 API TOKEN (MUST MATCH agent.py)
-# ==================================================
+# =============================
+# SECURITY
+# =============================
 
-API_TOKEN = "rellatrix_monitoring_tailscale"
+API_TOKEN = "rellatrix_noc_secure_2026"
 
-# ==================================================
-# DEVICE STORAGE
-# ==================================================
+# =============================
+# STORAGE
+# =============================
 
 devices = {}
-OFFLINE_THRESHOLD = 15  # seconds
+ping_requests = {}
+ping_results = {}
+OFFLINE_THRESHOLD = 15
 
-# ==================================================
+
+# =============================
 # LOGIN PAGE
-# ==================================================
+# =============================
 
 LOGIN_PAGE = """
 <!DOCTYPE html>
@@ -57,15 +58,16 @@ button { padding:10px 20px; background:#2563eb; border:none; color:white; border
 </html>
 """
 
-# ==================================================
-# DASHBOARD PAGE (SMOOTH NOC VERSION)
-# ==================================================
+
+# =============================
+# DASHBOARD
+# =============================
 
 DASHBOARD_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>Tailscale NOC Dashboard</title>
+<title>Rellatrix Tailscale Monitoring</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <script>
@@ -77,11 +79,9 @@ async function fetchData() {
     const data = await response.json();
 
     for (const [name, device] of Object.entries(data)) {
-
         if (!deviceCards[name]) {
             createDeviceCard(name);
         }
-
         updateDeviceCard(name, device);
     }
 }
@@ -91,21 +91,28 @@ function createDeviceCard(name) {
 
     const card = document.createElement("div");
     card.className = "card";
-    card.id = "card_" + name;
 
     card.innerHTML = `
         <div class="card-header">
-            <span>${name}</span>
+            <span class="device-name">${name}</span>
             <span id="badge_${name}" class="badge gray">UNKNOWN</span>
         </div>
 
-        <p><b>Relay:</b> <span id="relay_${name}">-</span></p>
-        <p><b>Latency:</b> <span id="latency_${name}">0</span> ms</p>
-        <p><b>Jitter:</b> <span id="jitter_${name}">0</span></p>
-        <p><b>Packet Loss:</b> <span id="packet_${name}">0%</span></p>
-        <p><b>Download:</b> <span id="download_${name}">0</span> Mbps</p>
-        <p><b>Upload:</b> <span id="upload_${name}">0</span> Mbps</p>
-        <p><b>Last Seen:</b> <span id="last_${name}">-</span></p>
+        <div class="metrics">
+            <p><b>Relay:</b> <span id="relay_${name}">-</span></p>
+            <p><b>Latency:</b> <span id="latency_${name}">0</span> ms</p>
+            <p><b>Jitter:</b> <span id="jitter_${name}">0</span></p>
+            <p><b>Packet Loss:</b> <span id="packet_${name}">0%</span></p>
+            <p><b>Download:</b> <span id="download_${name}">0</span> Mbps</p>
+            <p><b>Upload:</b> <span id="upload_${name}">0</span> Mbps</p>
+            <p><b>Last Seen:</b> <span id="last_${name}">-</span></p>
+        </div>
+
+        <button class="ping-btn" onclick="runPing('${name}')">
+         Run Tailscale Ping
+        </button>
+
+        <pre id="ping_${name}" class="ping-output"></pre>
 
         <canvas id="chart_${name}" height="120"></canvas>
     `;
@@ -136,9 +143,7 @@ function createDeviceCard(name) {
         options: {
             responsive: true,
             animation: false,
-            scales: {
-                y: { beginAtZero: true }
-            }
+            scales: { y: { beginAtZero: true } }
         }
     });
 
@@ -146,7 +151,6 @@ function createDeviceCard(name) {
 }
 
 function updateDeviceCard(name, device) {
-
     document.getElementById("relay_" + name).innerText = device.relay;
     document.getElementById("latency_" + name).innerText = device.latency;
     document.getElementById("jitter_" + name).innerText = device.jitter;
@@ -183,133 +187,186 @@ function updateDeviceCard(name, device) {
     chart.update();
 }
 
+async function runPing(name) {
+    await fetch('/api/request_ping/' + name);
+    document.getElementById("ping_" + name).innerText = "Running tailscale ping...";
+
+    setTimeout(async () => {
+        const res = await fetch('/api/get_ping/' + name);
+        const data = await res.json();
+        document.getElementById("ping_" + name).innerText = data.output;
+    }, 8000);
+}
+
 setInterval(fetchData, 2000);
 window.onload = fetchData;
 </script>
 
 <style>
-body { background:#0f172a; color:white; font-family:Arial; margin:0; }
+body {
+    background:#0b1320;
+    color:white;
+    font-family:Arial;
+    margin:0;
+}
 
-.header {
+.banner {
+    background:linear-gradient(90deg,#111827,#1e293b);
     padding:20px;
-    background:#111827;
-    font-size:20px;
+    font-size:22px;
+    font-weight:bold;
+    text-align:center;
+    border-bottom:1px solid #1f2937;
 }
 
 .container {
     display:grid;
-    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-    gap:20px;
-    padding:20px;
+    grid-template-columns: repeat(auto-fill, minmax(450px, 1fr));
+    gap:25px;
+    padding:25px;
 }
 
 .card {
     background:#1f2937;
-    border-radius:10px;
-    padding:15px;
-    box-shadow:0 0 15px rgba(0,0,0,0.4);
+    border-radius:12px;
+    padding:20px;
+    box-shadow:0 0 25px rgba(0,0,0,0.4);
 }
 
 .card-header {
     display:flex;
     justify-content:space-between;
+    margin-bottom:15px;
+}
+
+.device-name {
     font-size:18px;
-    margin-bottom:10px;
+    font-weight:bold;
 }
 
 .badge {
-    padding:5px 12px;
+    padding:6px 14px;
     border-radius:20px;
     font-size:12px;
+    font-weight:bold;
 }
 
 .green { background:#16a34a; }
 .red { background:#dc2626; }
 .gray { background:#6b7280; }
+
+.metrics p {
+    margin:4px 0;
+}
+
+.ping-btn {
+    margin-top:10px;
+    padding:10px 18px;
+    background:linear-gradient(90deg,#2563eb,#1d4ed8);
+    border:none;
+    color:white;
+    font-weight:bold;
+    border-radius:8px;
+    cursor:pointer;
+    transition:0.2s;
+}
+
+.ping-btn:hover {
+    transform:translateY(-2px);
+    box-shadow:0 4px 12px rgba(37,99,235,0.6);
+}
+
+.ping-output {
+    background:#0f172a;
+    padding:10px;
+    margin-top:10px;
+    height:130px;
+    overflow:auto;
+    border-radius:6px;
+}
 </style>
 </head>
 
 <body>
-<div class="header">
-Tailscale Network Operations Center
+<div class="banner">
+    Rellatrix Tailscale Monitoring
 </div>
 
 <div class="container" id="deviceContainer"></div>
-
 </body>
 </html>
 """
 
-# ==================================================
+# =============================
 # ROUTES
-# ==================================================
+# =============================
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = ""
     if request.method == "POST":
-        email = request.form["email"]
-        password = request.form["password"]
-
-        if email in users and users[email] == password:
-            session["user"] = email
-            return redirect(url_for("dashboard"))
-        else:
-            error = "Invalid credentials"
-
+        if users.get(request.form["email"]) == request.form["password"]:
+            session["user"] = request.form["email"]
+            return redirect("/")
+        error = "Invalid credentials"
     return render_template_string(LOGIN_PAGE, error=error)
-
-@app.route("/logout")
-def logout():
-    session.pop("user", None)
-    return redirect(url_for("login"))
 
 @app.route("/api/update", methods=["POST"])
 def update():
-    token = request.headers.get("Authorization")
-    if token != API_TOKEN:
+    if request.headers.get("Authorization") != API_TOKEN:
         return jsonify({"error": "unauthorized"}), 403
 
     data = request.json
-    name = data.get("device")
-
-    devices[name] = {
-        "status": data.get("status"),
-        "relay": data.get("relay"),
-        "latency": data.get("latency"),
-        "jitter": data.get("jitter"),
-        "packet_loss": data.get("packet_loss"),
-        "download_mbps": data.get("download_mbps"),
-        "upload_mbps": data.get("upload_mbps"),
+    devices[data["device"]] = {
+        **data,
         "last_seen": time.strftime("%H:%M:%S"),
         "timestamp": time.time()
     }
-
     return jsonify({"ok": True})
 
 @app.route("/api/devices")
 def get_devices():
     if "user" not in session:
-        return jsonify({"error": "unauthorized"}), 403
+        return jsonify({"error":"unauthorized"}),403
+    now = time.time()
+    return jsonify({
+        name: {**data, "offline": (now - data["timestamp"]) > OFFLINE_THRESHOLD}
+        for name, data in devices.items()
+    })
 
-    current_time = time.time()
-    output = {}
+@app.route("/api/request_ping/<device>")
+def request_ping(device):
+    if "user" not in session:
+        return jsonify({"error":"unauthorized"}),403
+    ping_requests["target"] = device
+    return jsonify({"ok":True})
 
-    for name, data in devices.items():
-        offline = (current_time - data["timestamp"]) > OFFLINE_THRESHOLD
-        output[name] = {**data, "offline": offline}
+@app.route("/api/ping_request")
+def ping_request():
+    if request.headers.get("Authorization") != API_TOKEN:
+        return jsonify({"error":"unauthorized"}),403
+    target = ping_requests.get("target")
+    ping_requests["target"] = None
+    return jsonify({"ping": target})
 
-    return jsonify(output)
+@app.route("/api/ping_result", methods=["POST"])
+def ping_result():
+    if request.headers.get("Authorization") != API_TOKEN:
+        return jsonify({"error":"unauthorized"}),403
+    ping_results[request.json["device"]] = request.json["output"]
+    return jsonify({"ok":True})
+
+@app.route("/api/get_ping/<device>")
+def get_ping(device):
+    if "user" not in session:
+        return jsonify({"error":"unauthorized"}),403
+    return jsonify({"output": ping_results.get(device, "Waiting...")})
 
 @app.route("/")
 def dashboard():
     if "user" not in session:
-        return redirect(url_for("login"))
+        return redirect("/login")
     return render_template_string(DASHBOARD_PAGE)
-
-# ==================================================
-# RUN
-# ==================================================
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000)
