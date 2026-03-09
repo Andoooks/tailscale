@@ -1,17 +1,12 @@
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session, send_file
+from flask import Flask, request, jsonify, render_template_string, redirect, session
 import time
 import sqlite3
-import os
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+import datetime
 
 app = Flask(__name__)
-app.secret_key = "change_this_to_random_secret_key"
+app.secret_key = "change_this_secret_key"
 
-# =============================
-# CONFIGURATION
-# =============================
-
+# ================= CONFIG =================
 API_TOKEN = "rellatrix_noc_secure_2026"
 DB = "monitoring.db"
 OFFLINE_THRESHOLD = 15
@@ -19,17 +14,10 @@ OFFLINE_THRESHOLD = 15
 users = {
     "jbabasa@rellatrix.com": "otm"
 }
-# Do you want to add more account?
-# users["new@email.com"] = "password"
 
 devices = {}
-ping_requests = {}
-ping_results = {}
 
-# =============================
-# DATABASE INIT
-# =============================
-
+# ================= DATABASE =================
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
@@ -37,7 +25,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            timestamp DATETIME,
             status TEXT,
             latency REAL,
             jitter REAL,
@@ -51,10 +39,7 @@ def init_db():
 
 init_db()
 
-# =============================
-# LOGIN PAGE
-# =============================
-
+# ================= LOGIN =================
 LOGIN_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -64,7 +49,7 @@ LOGIN_PAGE = """
 body { background:#0f172a; color:white; font-family:Arial; text-align:center; }
 form { margin-top:120px; }
 input { padding:10px; margin:10px; width:250px; border-radius:5px; border:none; }
-button { padding:10px 20px; background:#2563eb; border:none; color:white; border-radius:5px; }
+button { padding:10px 20px; background:#2563eb; border:none; color:white; border-radius:5px; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -79,10 +64,7 @@ button { padding:10px 20px; background:#2563eb; border:none; color:white; border
 </html>
 """
 
-# =============================
-# DASHBOARD UI
-# =============================
-
+# ================= DASHBOARD =================
 DASHBOARD_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -93,10 +75,14 @@ DASHBOARD_PAGE = """
 <script>
 let charts = {};
 let deviceCards = {};
+let currentActiveDevice = ""; // Tracks which device modal is open
 
 function todayDate() {
     const d = new Date();
-    return d.toISOString().split('T')[0];
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
 }
 
 async function fetchData() {
@@ -111,7 +97,6 @@ async function fetchData() {
 
 function createDeviceCard(name) {
     const container = document.getElementById("deviceContainer");
-
     const card = document.createElement("div");
     card.className = "card";
 
@@ -130,19 +115,20 @@ function createDeviceCard(name) {
         <p><b>Last Seen:</b> <span id="last_${name}">-</span></p>
 
         <div class="button-group">
-            <button class="ping-btn" onclick="runPing('${name}')">Run Ping</button>
-            <button class="summary-btn" onclick="showDailyStatus('${name}')">Daily Status</button>
+            <button class="status-btn" onclick="statusNow('${name}')">Status Now</button>
+            <button class="summary-btn" onclick="showToday('${name}')">History</button>
         </div>
 
-        <pre id="ping_${name}" class="ping-output"></pre>
-
-        <canvas id="chart_${name}" height="120"></canvas>
+        <div class="range-section">
+            <input type="date" id="start_${name}">
+            <input type="date" id="end_${name}">
+            <button class="range-btn" onclick="showRange('${name}')">View Range</button>
+        </div>
+        <canvas id="chart_${name}" height="120" style="margin-top:15px;"></canvas>
     `;
 
     container.appendChild(card);
-
     const ctx = document.getElementById("chart_" + name).getContext('2d');
-
     charts[name] = new Chart(ctx, {
         type: 'line',
         data: {
@@ -154,7 +140,6 @@ function createDeviceCard(name) {
         },
         options: { responsive: true, animation: false }
     });
-
     deviceCards[name] = true;
 }
 
@@ -185,265 +170,213 @@ function updateDeviceCard(name, device) {
         chart.data.datasets[0].data.shift();
         chart.data.datasets[1].data.shift();
     }
-
     chart.data.labels.push("");
     chart.data.datasets[0].data.push(device.download_mbps);
     chart.data.datasets[1].data.push(device.upload_mbps);
     chart.update();
 }
 
-async function runPing(name) {
-    await fetch('/api/request_ping/' + name);
-    document.getElementById("ping_" + name).innerText = "Running ping...";
-    setTimeout(async () => {
-        const res = await fetch('/api/get_ping/' + name);
-        const data = await res.json();
-        document.getElementById("ping_" + name).innerText = data.output;
-    }, 8000);
+async function statusNow(name) {
+    const res = await fetch('/api/status_now/' + name, { method: 'POST' });
+    const data = await res.json();
+    if(data.ok) {
+        // If the modal is already open for this device, refresh the list automatically
+        if (document.getElementById("modal").style.display === "flex" && currentActiveDevice === name) {
+            refreshModal();
+        } else {
+            showToday(name);
+        }
+    }
 }
 
-async function showDailyStatus(device) {
+async function showToday(device) {
+    currentActiveDevice = device;
     const date = todayDate();
-    const res = await fetch('/api/daily_summary/' + date);
+    const res = await fetch(`/api/daily_summary/${date}?device=${device}`);
     const data = await res.json();
+    showModal(device, date, date, data);
+}
 
-    let output = "Daily Status for " + device + " (" + date + ")\\n\\n";
-
-    const filtered = data.filter(e => e.device === device);
-
-    if (filtered.length === 0) {
-        output += "No incidents recorded today.";
+// Function specifically for the Refresh button inside modal
+async function refreshModal() {
+    if (!currentActiveDevice) return;
+    const date = todayDate();
+    const res = await fetch(`/api/daily_summary/${date}?device=${currentActiveDevice}`);
+    const data = await res.json();
+    
+    let output = `History for ${currentActiveDevice}\\nFrom ${date} to ${date}\\n\\n`;
+    if (data.length === 0) {
+        output += "No status records found.";
     } else {
-        filtered.forEach(e => {
+        data.forEach(e => {
             output += e.time + " → " + e.event + "\\n";
         });
     }
+    document.getElementById("modalContent").innerText = output;
+    
+    // Auto-scroll to bottom to see latest entry
+    const pre = document.getElementById("modalContent");
+    pre.scrollTop = pre.scrollHeight;
+}
 
+async function showRange(device) {
+    currentActiveDevice = device;
+    const start = document.getElementById("start_" + device).value;
+    const end = document.getElementById("end_" + device).value;
+    if (!start || !end) { alert("Select both dates."); return; }
+
+    const res = await fetch(`/api/range_summary?device=${device}&start=${start}&end=${end}`);
+    const data = await res.json();
+    showModal(device, start, end, data);
+}
+
+function showModal(device, start, end, data) {
+    let output = `History for ${device}\\nFrom ${start} to ${end}\\n\\n`;
+    if (data.length === 0) {
+        output += "No status records found.";
+    } else {
+        data.forEach(e => {
+            output += e.time + " → " + e.event + "\\n";
+        });
+    }
     document.getElementById("modalContent").innerText = output;
     document.getElementById("modal").style.display = "flex";
+    
+    const pre = document.getElementById("modalContent");
+    pre.scrollTop = pre.scrollHeight;
 }
 
 function closeModal() {
     document.getElementById("modal").style.display = "none";
+    currentActiveDevice = "";
 }
 
 setInterval(fetchData, 2000);
 window.onload = fetchData;
-
 </script>
 
 <style>
 body { background:#0b1320; color:white; font-family:Arial; margin:0; }
-
-.container {
-    display:grid;
-    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-    gap:20px;
-    padding:20px;
-}
-
-.card {
-    background:#1f2937;
-    padding:20px;
-    border-radius:10px;
-}
-
-.badge {
-    padding:5px 10px;
-    border-radius:20px;
-}
-
+.container { display:grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap:20px; padding:20px; }
+.card { background:#1f2937; padding:20px; border-radius:10px; border: 1px solid #374151; }
+.badge { padding:5px 10px; border-radius:20px; font-size:12px; font-weight: bold; }
 .green { background:#16a34a; }
 .red { background:#dc2626; }
 .gray { background:#6b7280; }
+.button-group { display:flex; gap:10px; margin-top:10px; }
+.range-section { margin-top:10px; display:flex; gap:6px; }
+.range-section input { background:#0f172a; color:white; border:1px solid #374151; padding:5px; border-radius:5px; }
 
-.button-group {
-    margin-top:10px;
-    display:flex;
-    gap:10px;
-}
+.status-btn { padding:6px 12px; background:#2563eb; border:none; color:white; border-radius:6px; cursor:pointer; font-weight:bold; }
+.summary-btn { padding:6px 12px; background:#9333ea; border:none; color:white; border-radius:6px; cursor:pointer; font-weight:bold; }
+.range-btn { padding:6px 12px; background:#f59e0b; border:none; color:white; border-radius:6px; cursor:pointer; font-weight:bold; }
 
-.ping-btn {
-    padding:8px 14px;
-    background:#2563eb;
-    border:none;
-    color:white;
-    border-radius:6px;
-    cursor:pointer;
-}
+/* Modal Styles */
+.modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); align-items:center; justify-content:center; z-index:100; }
+.modal-content { background:#1f2937; padding:20px; width:700px; height:85vh; border-radius:10px; border: 1px solid #4b5563; display:flex; flex-direction: column; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+.modal-title { font-size: 18px; font-weight: bold; }
 
-.summary-btn {
-    padding:8px 14px;
-    background:#9333ea;
-    border:none;
-    color:white;
-    border-radius:6px;
-    cursor:pointer;
-}
+.modal-actions { display: flex; gap: 15px; align-items: center; }
+.refresh-link { color: #60a5fa; cursor: pointer; text-decoration: underline; font-size: 14px; }
+.close-btn { cursor:pointer; color:#ef4444; font-size: 20px; font-weight:bold; }
 
-.ping-output {
-    background:#0f172a;
-    padding:10px;
-    margin-top:10px;
-    height:120px;
-    overflow:auto;
-}
-
-.modal {
-    display:none;
-    position:fixed;
-    top:0;
-    left:0;
-    width:100%;
-    height:100%;
-    background:rgba(0,0,0,0.6);
-    align-items:center;
-    justify-content:center;
-}
-
-.modal-content {
-    background:#1f2937;
-    padding:20px;
-    width:600px;
-    max-height:80%;
-    overflow:auto;
-    border-radius:8px;
-}
-
-.close-btn {
-    float:right;
-    cursor:pointer;
-    color:#ef4444;
-}
+pre { background:#0f172a; padding:15px; border-radius:5px; flex-grow: 1; overflow-y: auto; white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 14px; border: 1px solid #1e293b; }
 </style>
 </head>
 
 <body>
-
 <div class="container" id="deviceContainer"></div>
 
 <div id="modal" class="modal">
     <div class="modal-content">
-        <span class="close-btn" onclick="closeModal()">Close ✖</span>
+        <div class="modal-header">
+            <span class="modal-title">Live History Log</span>
+            <div class="modal-actions">
+                <span class="refresh-link" onclick="refreshModal()">↻ Refresh Data</span>
+                <span class="close-btn" onclick="closeModal()">Close ✖</span>
+            </div>
+        </div>
         <pre id="modalContent"></pre>
     </div>
 </div>
-
 </body>
 </html>
 """
 
-# =============================
-# ROUTES
-# =============================
+# ================= ROUTES (Backend remains the same) =================
 
-@app.route("/login", methods=["GET", "POST"])
+@app.route("/login", methods=["GET","POST"])
 def login():
-    error = ""
-    if request.method == "POST":
-        if users.get(request.form["email"]) == request.form["password"]:
-            session["user"] = request.form["email"]
+    error=""
+    if request.method=="POST":
+        if users.get(request.form["email"])==request.form["password"]:
+            session["user"]=request.form["email"]
             return redirect("/")
-        error = "Invalid credentials"
-    return render_template_string(LOGIN_PAGE, error=error)
+        error="Invalid credentials"
+    return render_template_string(LOGIN_PAGE,error=error)
 
 @app.route("/api/update", methods=["POST"])
 def update():
-    if request.headers.get("Authorization") != API_TOKEN:
-        return jsonify({"error": "unauthorized"}), 403
+    if request.headers.get("Authorization")!=API_TOKEN:
+        return jsonify({"error":"unauthorized"}),403
+    data=request.json
+    local_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    devices[data["device"]] = {**data, "last_seen": time.strftime("%H:%M:%S"), "timestamp": time.time()}
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("INSERT INTO logs (device,timestamp,status,latency,jitter,packet_loss,download,upload) VALUES (?,?,?,?,?,?,?,?)",
+              (data["device"], local_ts, data["status"], data["latency"], data["jitter"], data["packet_loss"], data["download_mbps"], data["upload_mbps"]))
+    conn.commit(); conn.close()
+    return jsonify({"ok":True})
 
-    data = request.json
-
-    devices[data["device"]] = {
-        **data,
-        "last_seen": time.strftime("%H:%M:%S"),
-        "timestamp": time.time()
-    }
-
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO logs (device, status, latency, jitter, packet_loss, download, upload)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        data["device"],
-        data["status"],
-        data["latency"],
-        data["jitter"],
-        data["packet_loss"],
-        data["download_mbps"],
-        data["upload_mbps"]
-    ))
-    conn.commit()
-    conn.close()
-
+@app.route("/api/status_now/<device_name>", methods=["POST"])
+def status_now(device_name):
+    if "user" not in session: return jsonify({"error":"unauthorized"}),403
+    device = devices.get(device_name)
+    if not device: return jsonify({"error": "Device not found"}), 404
+    local_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB); c = conn.cursor()
+    c.execute("INSERT INTO logs (device, timestamp, status, latency, jitter, packet_loss, download, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              (device_name, local_ts, device["status"], device["latency"], device["jitter"], device["packet_loss"], device["download_mbps"], device["upload_mbps"]))
+    conn.commit(); conn.close()
     return jsonify({"ok": True})
 
 @app.route("/api/devices")
 def get_devices():
-    if "user" not in session:
-        return jsonify({"error":"unauthorized"}),403
-    now = time.time()
-    return jsonify({
-        name: {**data, "offline": (now - data["timestamp"]) > OFFLINE_THRESHOLD}
-        for name, data in devices.items()
-    })
+    if "user" not in session: return jsonify({"error":"unauthorized"}),403
+    now=time.time()
+    return jsonify({name:{**data,"offline":(now-data["timestamp"])>OFFLINE_THRESHOLD} for name,data in devices.items()})
 
 @app.route("/api/daily_summary/<date>")
 def daily_summary(date):
-    if "user" not in session:
-        return jsonify({"error":"unauthorized"}),403
-
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT device, timestamp, status, packet_loss, download FROM logs WHERE DATE(timestamp)=?", (date,))
-    rows = c.fetchall()
-    conn.close()
-
-    events = []
-    for device, ts, status, loss, download in rows:
-        if status == "DERP":
-            events.append({"time": ts, "device": device, "event": "DERP routing"})
-        try:
-            if float(loss.replace("%","")) > 5:
-                events.append({"time": ts, "device": device, "event": "High packet loss"})
-        except:
-            pass
-        if download is not None and download < 1:
-            events.append({"time": ts, "device": device, "event": "Slow internet"})
+    if "user" not in session: return jsonify({"error":"unauthorized"}),403
+    device_name = request.args.get("device")
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT timestamp, status, download FROM logs WHERE DATE(timestamp) = ? AND device = ? ORDER BY timestamp ASC", (date, device_name))
+    rows=c.fetchall(); conn.close()
+    events=[]
+    for ts, status, download in rows:
+        events.append({"time": ts, "event": "DERP routing" if status == "DERP" else "DIRECT routing"})
+        events.append({"time": ts, "event": "Slow internet" if (download is not None and download < 1) else "Fast internet"})
     return jsonify(events)
 
-@app.route("/report/<date>")
-def generate_report(date):
-    if "user" not in session:
-        return jsonify({"error":"unauthorized"}),403
-
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT device, timestamp, status, packet_loss, download FROM logs WHERE DATE(timestamp)=?", (date,))
-    rows = c.fetchall()
-    conn.close()
-
-    filename = f"report_{date}.pdf"
-    styles = getSampleStyleSheet()
-    story = []
-    story.append(Paragraph("Rellatrix Tailscale Monitoring Report", styles['Title']))
-    story.append(Paragraph(f"Date: {date}", styles['Normal']))
-    story.append(Spacer(1,20))
-
-    for row in rows:
-        story.append(Paragraph(str(row), styles['Normal']))
-
-    doc = SimpleDocTemplate(filename)
-    doc.build(story)
-
-    return send_file(filename, as_attachment=True)
+@app.route("/api/range_summary")
+def range_summary():
+    if "user" not in session: return jsonify({"error":"unauthorized"}),403
+    device=request.args.get("device"); start=request.args.get("start"); end=request.args.get("end")
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    c.execute("SELECT timestamp, status, download FROM logs WHERE device=? AND DATE(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",(device,start,end))
+    rows=c.fetchall(); conn.close()
+    events=[]
+    for ts, status, download in rows:
+        events.append({"time": ts, "event": "DERP routing" if status == "DERP" else "DIRECT routing"})
+        events.append({"time": ts, "event": "Slow internet" if (download is not None and download < 1) else "Fast internet"})
+    return jsonify(events)
 
 @app.route("/")
 def dashboard():
-    if "user" not in session:
-        return redirect("/login")
+    if "user" not in session: return redirect("/login")
     return render_template_string(DASHBOARD_PAGE)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     app.run(host="127.0.0.1", port=5000)
