@@ -1,12 +1,20 @@
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session, send_file
 import time
+import sqlite3
+import os
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
 app = Flask(__name__)
 app.secret_key = "change_this_to_random_secret_key"
 
 # =============================
-# USERS
+# CONFIGURATION
 # =============================
+
+API_TOKEN = "rellatrix_noc_secure_2026"
+DB = "monitoring.db"
+OFFLINE_THRESHOLD = 15
 
 users = {
     "jbabasa@rellatrix.com": "otm"
@@ -14,21 +22,34 @@ users = {
 # Do you want to add more account?
 # users["new@email.com"] = "password"
 
-# =============================
-# SECURITY
-# =============================
-
-API_TOKEN = "rellatrix_noc_secure_2026"
-
-# =============================
-# STORAGE
-# =============================
-
 devices = {}
 ping_requests = {}
 ping_results = {}
-OFFLINE_THRESHOLD = 15
 
+# =============================
+# DATABASE INIT
+# =============================
+
+def init_db():
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT,
+            latency REAL,
+            jitter REAL,
+            packet_loss TEXT,
+            download REAL,
+            upload REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
 
 # =============================
 # LOGIN PAGE
@@ -47,7 +68,7 @@ button { padding:10px 20px; background:#2563eb; border:none; color:white; border
 </style>
 </head>
 <body>
-<h2>Tailscale NOC Login</h2>
+<h2>Rellatrix Tailscale Monitoring</h2>
 <form method="POST">
 <input type="email" name="email" placeholder="Email" required><br>
 <input type="password" name="password" placeholder="Password" required><br>
@@ -58,9 +79,8 @@ button { padding:10px 20px; background:#2563eb; border:none; color:white; border
 </html>
 """
 
-
 # =============================
-# DASHBOARD
+# DASHBOARD UI
 # =============================
 
 DASHBOARD_PAGE = """
@@ -74,14 +94,17 @@ DASHBOARD_PAGE = """
 let charts = {};
 let deviceCards = {};
 
+function todayDate() {
+    const d = new Date();
+    return d.toISOString().split('T')[0];
+}
+
 async function fetchData() {
     const response = await fetch('/api/devices');
     const data = await response.json();
 
     for (const [name, device] of Object.entries(data)) {
-        if (!deviceCards[name]) {
-            createDeviceCard(name);
-        }
+        if (!deviceCards[name]) createDeviceCard(name);
         updateDeviceCard(name, device);
     }
 }
@@ -98,19 +121,18 @@ function createDeviceCard(name) {
             <span id="badge_${name}" class="badge gray">UNKNOWN</span>
         </div>
 
-        <div class="metrics">
-            <p><b>Relay:</b> <span id="relay_${name}">-</span></p>
-            <p><b>Latency:</b> <span id="latency_${name}">0</span> ms</p>
-            <p><b>Jitter:</b> <span id="jitter_${name}">0</span></p>
-            <p><b>Packet Loss:</b> <span id="packet_${name}">0%</span></p>
-            <p><b>Download:</b> <span id="download_${name}">0</span> Mbps</p>
-            <p><b>Upload:</b> <span id="upload_${name}">0</span> Mbps</p>
-            <p><b>Last Seen:</b> <span id="last_${name}">-</span></p>
-        </div>
+        <p><b>Relay:</b> <span id="relay_${name}">-</span></p>
+        <p><b>Latency:</b> <span id="latency_${name}">0</span> ms</p>
+        <p><b>Jitter:</b> <span id="jitter_${name}">0</span></p>
+        <p><b>Packet Loss:</b> <span id="packet_${name}">0%</span></p>
+        <p><b>Download:</b> <span id="download_${name}">0</span> Mbps</p>
+        <p><b>Upload:</b> <span id="upload_${name}">0</span> Mbps</p>
+        <p><b>Last Seen:</b> <span id="last_${name}">-</span></p>
 
-        <button class="ping-btn" onclick="runPing('${name}')">
-         Run Tailscale Ping
-        </button>
+        <div class="button-group">
+            <button class="ping-btn" onclick="runPing('${name}')">Run Ping</button>
+            <button class="summary-btn" onclick="showDailyStatus('${name}')">Daily Status</button>
+        </div>
 
         <pre id="ping_${name}" class="ping-output"></pre>
 
@@ -126,25 +148,11 @@ function createDeviceCard(name) {
         data: {
             labels: [],
             datasets: [
-                {
-                    label: 'Download Mbps',
-                    borderColor: '#22c55e',
-                    data: [],
-                    tension: 0.3
-                },
-                {
-                    label: 'Upload Mbps',
-                    borderColor: '#3b82f6',
-                    data: [],
-                    tension: 0.3
-                }
+                { label: 'Download Mbps', borderColor: '#22c55e', data: [] },
+                { label: 'Upload Mbps', borderColor: '#3b82f6', data: [] }
             ]
         },
-        options: {
-            responsive: true,
-            animation: false,
-            scales: { y: { beginAtZero: true } }
-        }
+        options: { responsive: true, animation: false }
     });
 
     deviceCards[name] = true;
@@ -160,7 +168,6 @@ function updateDeviceCard(name, device) {
     document.getElementById("last_" + name).innerText = device.last_seen;
 
     const badge = document.getElementById("badge_" + name);
-
     if (device.offline) {
         badge.className = "badge gray";
         badge.innerText = "OFFLINE";
@@ -173,7 +180,6 @@ function updateDeviceCard(name, device) {
     }
 
     const chart = charts[name];
-
     if (chart.data.labels.length > 30) {
         chart.data.labels.shift();
         chart.data.datasets[0].data.shift();
@@ -183,14 +189,12 @@ function updateDeviceCard(name, device) {
     chart.data.labels.push("");
     chart.data.datasets[0].data.push(device.download_mbps);
     chart.data.datasets[1].data.push(device.upload_mbps);
-
     chart.update();
 }
 
 async function runPing(name) {
     await fetch('/api/request_ping/' + name);
-    document.getElementById("ping_" + name).innerText = "Running tailscale ping...";
-
+    document.getElementById("ping_" + name).innerText = "Running ping...";
     setTimeout(async () => {
         const res = await fetch('/api/get_ping/' + name);
         const data = await res.json();
@@ -198,101 +202,133 @@ async function runPing(name) {
     }, 8000);
 }
 
+async function showDailyStatus(device) {
+    const date = todayDate();
+    const res = await fetch('/api/daily_summary/' + date);
+    const data = await res.json();
+
+    let output = "Daily Status for " + device + " (" + date + ")\\n\\n";
+
+    const filtered = data.filter(e => e.device === device);
+
+    if (filtered.length === 0) {
+        output += "No incidents recorded today.";
+    } else {
+        filtered.forEach(e => {
+            output += e.time + " → " + e.event + "\\n";
+        });
+    }
+
+    document.getElementById("modalContent").innerText = output;
+    document.getElementById("modal").style.display = "flex";
+}
+
+function closeModal() {
+    document.getElementById("modal").style.display = "none";
+}
+
 setInterval(fetchData, 2000);
 window.onload = fetchData;
+
 </script>
 
 <style>
-body {
-    background:#0b1320;
-    color:white;
-    font-family:Arial;
-    margin:0;
-}
-
-.banner {
-    background:linear-gradient(90deg,#111827,#1e293b);
-    padding:20px;
-    font-size:22px;
-    font-weight:bold;
-    text-align:center;
-    border-bottom:1px solid #1f2937;
-}
+body { background:#0b1320; color:white; font-family:Arial; margin:0; }
 
 .container {
     display:grid;
-    grid-template-columns: repeat(auto-fill, minmax(450px, 1fr));
-    gap:25px;
-    padding:25px;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap:20px;
+    padding:20px;
 }
 
 .card {
     background:#1f2937;
-    border-radius:12px;
     padding:20px;
-    box-shadow:0 0 25px rgba(0,0,0,0.4);
-}
-
-.card-header {
-    display:flex;
-    justify-content:space-between;
-    margin-bottom:15px;
-}
-
-.device-name {
-    font-size:18px;
-    font-weight:bold;
+    border-radius:10px;
 }
 
 .badge {
-    padding:6px 14px;
+    padding:5px 10px;
     border-radius:20px;
-    font-size:12px;
-    font-weight:bold;
 }
 
 .green { background:#16a34a; }
 .red { background:#dc2626; }
 .gray { background:#6b7280; }
 
-.metrics p {
-    margin:4px 0;
+.button-group {
+    margin-top:10px;
+    display:flex;
+    gap:10px;
 }
 
 .ping-btn {
-    margin-top:10px;
-    padding:10px 18px;
-    background:linear-gradient(90deg,#2563eb,#1d4ed8);
+    padding:8px 14px;
+    background:#2563eb;
     border:none;
     color:white;
-    font-weight:bold;
-    border-radius:8px;
+    border-radius:6px;
     cursor:pointer;
-    transition:0.2s;
 }
 
-.ping-btn:hover {
-    transform:translateY(-2px);
-    box-shadow:0 4px 12px rgba(37,99,235,0.6);
+.summary-btn {
+    padding:8px 14px;
+    background:#9333ea;
+    border:none;
+    color:white;
+    border-radius:6px;
+    cursor:pointer;
 }
 
 .ping-output {
     background:#0f172a;
     padding:10px;
     margin-top:10px;
-    height:130px;
+    height:120px;
     overflow:auto;
-    border-radius:6px;
+}
+
+.modal {
+    display:none;
+    position:fixed;
+    top:0;
+    left:0;
+    width:100%;
+    height:100%;
+    background:rgba(0,0,0,0.6);
+    align-items:center;
+    justify-content:center;
+}
+
+.modal-content {
+    background:#1f2937;
+    padding:20px;
+    width:600px;
+    max-height:80%;
+    overflow:auto;
+    border-radius:8px;
+}
+
+.close-btn {
+    float:right;
+    cursor:pointer;
+    color:#ef4444;
 }
 </style>
 </head>
 
 <body>
-<div class="banner">
-    Rellatrix Tailscale Monitoring
-</div>
 
 <div class="container" id="deviceContainer"></div>
+
+<div id="modal" class="modal">
+    <div class="modal-content">
+        <span class="close-btn" onclick="closeModal()">Close ✖</span>
+        <pre id="modalContent"></pre>
+    </div>
+</div>
+
 </body>
 </html>
 """
@@ -317,11 +353,30 @@ def update():
         return jsonify({"error": "unauthorized"}), 403
 
     data = request.json
+
     devices[data["device"]] = {
         **data,
         "last_seen": time.strftime("%H:%M:%S"),
         "timestamp": time.time()
     }
+
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO logs (device, status, latency, jitter, packet_loss, download, upload)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data["device"],
+        data["status"],
+        data["latency"],
+        data["jitter"],
+        data["packet_loss"],
+        data["download_mbps"],
+        data["upload_mbps"]
+    ))
+    conn.commit()
+    conn.close()
+
     return jsonify({"ok": True})
 
 @app.route("/api/devices")
@@ -334,33 +389,55 @@ def get_devices():
         for name, data in devices.items()
     })
 
-@app.route("/api/request_ping/<device>")
-def request_ping(device):
+@app.route("/api/daily_summary/<date>")
+def daily_summary(date):
     if "user" not in session:
         return jsonify({"error":"unauthorized"}),403
-    ping_requests["target"] = device
-    return jsonify({"ok":True})
 
-@app.route("/api/ping_request")
-def ping_request():
-    if request.headers.get("Authorization") != API_TOKEN:
-        return jsonify({"error":"unauthorized"}),403
-    target = ping_requests.get("target")
-    ping_requests["target"] = None
-    return jsonify({"ping": target})
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT device, timestamp, status, packet_loss, download FROM logs WHERE DATE(timestamp)=?", (date,))
+    rows = c.fetchall()
+    conn.close()
 
-@app.route("/api/ping_result", methods=["POST"])
-def ping_result():
-    if request.headers.get("Authorization") != API_TOKEN:
-        return jsonify({"error":"unauthorized"}),403
-    ping_results[request.json["device"]] = request.json["output"]
-    return jsonify({"ok":True})
+    events = []
+    for device, ts, status, loss, download in rows:
+        if status == "DERP":
+            events.append({"time": ts, "device": device, "event": "DERP routing"})
+        try:
+            if float(loss.replace("%","")) > 5:
+                events.append({"time": ts, "device": device, "event": "High packet loss"})
+        except:
+            pass
+        if download is not None and download < 1:
+            events.append({"time": ts, "device": device, "event": "Slow internet"})
+    return jsonify(events)
 
-@app.route("/api/get_ping/<device>")
-def get_ping(device):
+@app.route("/report/<date>")
+def generate_report(date):
     if "user" not in session:
         return jsonify({"error":"unauthorized"}),403
-    return jsonify({"output": ping_results.get(device, "Waiting...")})
+
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT device, timestamp, status, packet_loss, download FROM logs WHERE DATE(timestamp)=?", (date,))
+    rows = c.fetchall()
+    conn.close()
+
+    filename = f"report_{date}.pdf"
+    styles = getSampleStyleSheet()
+    story = []
+    story.append(Paragraph("Rellatrix Tailscale Monitoring Report", styles['Title']))
+    story.append(Paragraph(f"Date: {date}", styles['Normal']))
+    story.append(Spacer(1,20))
+
+    for row in rows:
+        story.append(Paragraph(str(row), styles['Normal']))
+
+    doc = SimpleDocTemplate(filename)
+    doc.build(story)
+
+    return send_file(filename, as_attachment=True)
 
 @app.route("/")
 def dashboard():
