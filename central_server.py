@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, render_template_string, redirect, ses
 import time
 import sqlite3
 import datetime
+import subprocess  # Added for the ping command
 
 app = Flask(__name__)
 app.secret_key = "change_this_secret_key"
@@ -75,7 +76,7 @@ DASHBOARD_PAGE = """
 <script>
 let charts = {};
 let deviceCards = {};
-let currentActiveDevice = ""; // Tracks which device modal is open
+let currentActiveDevice = ""; 
 
 function todayDate() {
     const d = new Date();
@@ -116,6 +117,7 @@ function createDeviceCard(name) {
 
         <div class="button-group">
             <button class="status-btn" onclick="statusNow('${name}')">Status Now</button>
+            <button class="ping-btn" onclick="pingDevice('${name}')">Ping Device</button>
             <button class="summary-btn" onclick="showToday('${name}')">History</button>
         </div>
 
@@ -176,11 +178,28 @@ function updateDeviceCard(name, device) {
     chart.update();
 }
 
+async function pingDevice(name) {
+    const btn = event.target;
+    const originalText = btn.innerText;
+    btn.innerText = "Pinging...";
+    btn.disabled = True;
+    
+    try {
+        const res = await fetch('/api/ping/' + name, { method: 'POST' });
+        const data = await res.json();
+        alert(data.output);
+    } catch (e) {
+        alert("Ping failed to execute.");
+    } finally {
+        btn.innerText = originalText;
+        btn.disabled = false;
+    }
+}
+
 async function statusNow(name) {
     const res = await fetch('/api/status_now/' + name, { method: 'POST' });
     const data = await res.json();
     if(data.ok) {
-        // If the modal is already open for this device, refresh the list automatically
         if (document.getElementById("modal").style.display === "flex" && currentActiveDevice === name) {
             refreshModal();
         } else {
@@ -197,26 +216,12 @@ async function showToday(device) {
     showModal(device, date, date, data);
 }
 
-// Function specifically for the Refresh button inside modal
 async function refreshModal() {
     if (!currentActiveDevice) return;
     const date = todayDate();
     const res = await fetch(`/api/daily_summary/${date}?device=${currentActiveDevice}`);
     const data = await res.json();
-    
-    let output = `History for ${currentActiveDevice}\\nFrom ${date} to ${date}\\n\\n`;
-    if (data.length === 0) {
-        output += "No status records found.";
-    } else {
-        data.forEach(e => {
-            output += e.time + " → " + e.event + "\\n";
-        });
-    }
-    document.getElementById("modalContent").innerText = output;
-    
-    // Auto-scroll to bottom to see latest entry
-    const pre = document.getElementById("modalContent");
-    pre.scrollTop = pre.scrollHeight;
+    renderModalData(currentActiveDevice, date, date, data);
 }
 
 async function showRange(device) {
@@ -231,6 +236,11 @@ async function showRange(device) {
 }
 
 function showModal(device, start, end, data) {
+    renderModalData(device, start, end, data);
+    document.getElementById("modal").style.display = "flex";
+}
+
+function renderModalData(device, start, end, data) {
     let output = `History for ${device}\\nFrom ${start} to ${end}\\n\\n`;
     if (data.length === 0) {
         output += "No status records found.";
@@ -239,10 +249,8 @@ function showModal(device, start, end, data) {
             output += e.time + " → " + e.event + "\\n";
         });
     }
-    document.getElementById("modalContent").innerText = output;
-    document.getElementById("modal").style.display = "flex";
-    
     const pre = document.getElementById("modalContent");
+    pre.innerText = output;
     pre.scrollTop = pre.scrollHeight;
 }
 
@@ -263,20 +271,19 @@ body { background:#0b1320; color:white; font-family:Arial; margin:0; }
 .green { background:#16a34a; }
 .red { background:#dc2626; }
 .gray { background:#6b7280; }
-.button-group { display:flex; gap:10px; margin-top:10px; }
+.button-group { display:flex; flex-wrap: wrap; gap:10px; margin-top:10px; }
 .range-section { margin-top:10px; display:flex; gap:6px; }
 .range-section input { background:#0f172a; color:white; border:1px solid #374151; padding:5px; border-radius:5px; }
 
 .status-btn { padding:6px 12px; background:#2563eb; border:none; color:white; border-radius:6px; cursor:pointer; font-weight:bold; }
+.ping-btn { padding:6px 12px; background:#0d9488; border:none; color:white; border-radius:6px; cursor:pointer; font-weight:bold; }
 .summary-btn { padding:6px 12px; background:#9333ea; border:none; color:white; border-radius:6px; cursor:pointer; font-weight:bold; }
 .range-btn { padding:6px 12px; background:#f59e0b; border:none; color:white; border-radius:6px; cursor:pointer; font-weight:bold; }
 
-/* Modal Styles */
 .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); align-items:center; justify-content:center; z-index:100; }
 .modal-content { background:#1f2937; padding:20px; width:700px; height:85vh; border-radius:10px; border: 1px solid #4b5563; display:flex; flex-direction: column; }
 .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
 .modal-title { font-size: 18px; font-weight: bold; }
-
 .modal-actions { display: flex; gap: 15px; align-items: center; }
 .refresh-link { color: #60a5fa; cursor: pointer; text-decoration: underline; font-size: 14px; }
 .close-btn { cursor:pointer; color:#ef4444; font-size: 20px; font-weight:bold; }
@@ -287,7 +294,6 @@ pre { background:#0f172a; padding:15px; border-radius:5px; flex-grow: 1; overflo
 
 <body>
 <div class="container" id="deviceContainer"></div>
-
 <div id="modal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
@@ -304,7 +310,7 @@ pre { background:#0f172a; padding:15px; border-radius:5px; flex-grow: 1; overflo
 </html>
 """
 
-# ================= ROUTES (Backend remains the same) =================
+# ================= ROUTES =================
 
 @app.route("/login", methods=["GET","POST"])
 def login():
@@ -329,6 +335,18 @@ def update():
     conn.commit(); conn.close()
     return jsonify({"ok":True})
 
+# --- NEW PING ROUTE ---
+@app.route("/api/ping/<device_name>", methods=["POST"])
+def ping_device(device_name):
+    if "user" not in session: return jsonify({"error":"unauthorized"}),403
+    # Note: Hardcoded IP as per your requirement
+    cmd = ["/Applications/Tailscale.app/Contents/MacOS/tailscale", "ping", "-c", "10", "100.76.204.94"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        return jsonify({"output": result.stdout if result.stdout else result.stderr})
+    except Exception as e:
+        return jsonify({"output": f"Error: {str(e)}"}), 500
+
 @app.route("/api/status_now/<device_name>", methods=["POST"])
 def status_now(device_name):
     if "user" not in session: return jsonify({"error":"unauthorized"}),403
@@ -347,17 +365,18 @@ def get_devices():
     now=time.time()
     return jsonify({name:{**data,"offline":(now-data["timestamp"])>OFFLINE_THRESHOLD} for name,data in devices.items()})
 
+# --- UPDATED LOGIC FOR SPEEDS ---
 @app.route("/api/daily_summary/<date>")
 def daily_summary(date):
     if "user" not in session: return jsonify({"error":"unauthorized"}),403
     device_name = request.args.get("device")
     conn=sqlite3.connect(DB); c=conn.cursor()
-    c.execute("SELECT timestamp, status, download FROM logs WHERE DATE(timestamp) = ? AND device = ? ORDER BY timestamp ASC", (date, device_name))
+    c.execute("SELECT timestamp, status, download, upload FROM logs WHERE DATE(timestamp) = ? AND device = ? ORDER BY timestamp ASC", (date, device_name))
     rows=c.fetchall(); conn.close()
     events=[]
-    for ts, status, download in rows:
-        events.append({"time": ts, "event": "DERP routing" if status == "DERP" else "DIRECT routing"})
-        events.append({"time": ts, "event": "Slow internet" if (download is not None and download < 1) else "Fast internet"})
+    for ts, status, dl, ul in rows:
+        events.append({"time": ts, "event": f"{status} routing"})
+        events.append({"time": ts, "event": f"Speed: DL {dl} Mbps / UL {ul} Mbps"})
     return jsonify(events)
 
 @app.route("/api/range_summary")
@@ -365,12 +384,12 @@ def range_summary():
     if "user" not in session: return jsonify({"error":"unauthorized"}),403
     device=request.args.get("device"); start=request.args.get("start"); end=request.args.get("end")
     conn=sqlite3.connect(DB); c=conn.cursor()
-    c.execute("SELECT timestamp, status, download FROM logs WHERE device=? AND DATE(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",(device,start,end))
+    c.execute("SELECT timestamp, status, download, upload FROM logs WHERE device=? AND DATE(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",(device,start,end))
     rows=c.fetchall(); conn.close()
     events=[]
-    for ts, status, download in rows:
-        events.append({"time": ts, "event": "DERP routing" if status == "DERP" else "DIRECT routing"})
-        events.append({"time": ts, "event": "Slow internet" if (download is not None and download < 1) else "Fast internet"})
+    for ts, status, dl, ul in rows:
+        events.append({"time": ts, "event": f"{status} routing"})
+        events.append({"time": ts, "event": f"Speed: DL {dl} Mbps / UL {ul} Mbps"})
     return jsonify(events)
 
 @app.route("/")
